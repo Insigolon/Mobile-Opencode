@@ -68,5 +68,7 @@
 		</array>
 		<key>UIStatusBarHidden</key>
 		<false/>
+		<key>NSLocalNetworkUsageDescription</key>
+		<string>Used to discover opencode servers on your Tailnet</string>
 	</dict>
 </plist>

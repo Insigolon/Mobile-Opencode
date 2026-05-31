@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:opencode/agent.dart';
+import 'package:provider/provider.dart';
 
 class OnboardingConnectPage extends StatefulWidget {
   final VoidCallback onConnected;
@@ -17,7 +17,7 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
   final passwordController = TextEditingController();
   bool obscurePassword = true;
   bool connecting = false;
-  bool connected = false;
+  String? error;
 
   @override
   void dispose() {
@@ -31,27 +31,27 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
     final password = passwordController.text.trim();
     if (url.isEmpty || password.isEmpty) return;
 
-    setState(() => connecting = true);
+    setState(() {
+      connecting = true;
+      error = null;
+    });
 
-    await Future.delayed(const Duration(seconds: 2));
-
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('server_url', url);
-
-    const storage = FlutterSecureStorage();
-    await storage.write(key: 'server_password', value: password);
+    final conn = context.read<ConnectionService>();
+    final ok = await conn.connectDirect(
+      baseUrl: url,
+      password: password,
+    );
 
     if (!mounted) return;
 
     setState(() {
       connecting = false;
-      connected = true;
+      if (ok) {
+        widget.onConnected();
+      } else {
+        error = conn.lastError;
+      }
     });
-
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (!mounted) return;
-
-    widget.onConnected();
   }
 
   void _showInstructions(BuildContext context) {
@@ -190,29 +190,28 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
                       ),
                     ),
 
+                    if (error != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        error!,
+                        style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+
                     const SizedBox(height: 30),
 
                     SizedBox(
                       width: double.infinity,
                       height: 54,
                       child: ElevatedButton(
-                        onPressed: (connecting || connected) ? null : _connect,
+                        onPressed: connecting ? null : _connect,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: connected
-                              ? Colors.green
-                              : Colors.white,
-                          foregroundColor: connected
-                              ? Colors.white
-                              : Colors.black,
-                          disabledBackgroundColor: Colors.green,
-                          disabledForegroundColor: Colors.white,
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
                         ),
                         child: Text(
-                          connecting
-                              ? "Connecting..."
-                              : connected
-                              ? "✓ Connected"
-                              : "Connect",
+                          connecting ? "Connecting..." : "Connect",
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                       ),

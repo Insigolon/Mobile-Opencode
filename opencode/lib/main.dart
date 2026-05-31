@@ -1,68 +1,65 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:opencode/agent.dart';
 import 'package:opencode/Screens/agents_dashboard.dart';
 import 'package:opencode/Screens/onboarding_page.dart';
 import 'package:opencode/Screens/settings_page.dart';
 import 'package:opencode/Screens/skills_page.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:opencode/Screens/splash_page.dart';
+import 'package:provider/provider.dart';
 
-void main() {
-  runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  final connection = ConnectionService();
+  await connection.loadSaved();
+
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: connection),
+        ChangeNotifierProxyProvider<ConnectionService, ChatService>(
+          create: (context) => ChatService(
+            client: connection.client,
+            events: EventService(client: connection.client),
+          ),
+          update: (_, conn, prev) => prev!,
+        ),
+      ],
+      child: const MyApp(),
+    ),
+  );
 }
 
-class MyApp extends StatefulWidget {
+class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
   @override
-  State<MyApp> createState() => _MyAppState();
-}
-
-class _MyAppState extends State<MyApp> {
-  bool? showOnboarding;
-
-  @override
-  void initState() {
-    super.initState();
-    _checkCredentials();
-  }
-
-  Future<void> _checkCredentials() async {
-    final prefs = await SharedPreferences.getInstance();
-    final hasUrl = prefs.containsKey('server_url');
-    const storage = FlutterSecureStorage();
-    final password = await storage.read(key: 'server_password');
-    final hasCredentials = hasUrl && password != null;
-    setState(() => showOnboarding = !hasCredentials);
-  }
-
-  void _onOnboardingComplete() {
-    setState(() => showOnboarding = false);
-  }
-
-  @override
   Widget build(BuildContext context) {
-    if (showOnboarding == null) {
-      return const MaterialApp(
-        debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          backgroundColor: Color(0xFF0B0B0B),
-          body: Center(
-            child: CircularProgressIndicator(color: Colors.white24),
-          ),
-        ),
-      );
-    }
+    return Consumer<ConnectionService>(
+      builder: (context, conn, _) {
+        Widget home;
+        switch (conn.status) {
+          case ConnectionStatus.connected:
+            home = const OpenCodeScreen();
+          case ConnectionStatus.disconnected:
+            home = OnboardingConnectPage(
+              onConnected: () {},
+            );
+          case ConnectionStatus.connecting:
+          case ConnectionStatus.error:
+            home = const SplashPage();
+        }
 
-    return MaterialApp(
-      title: 'OpenCode',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0B0B0B),
-      ),
-      home: showOnboarding!
-          ? OnboardingConnectPage(onConnected: _onOnboardingComplete)
-          : const OpenCodeScreen(),
+        return MaterialApp(
+          title: 'OpenCode',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData.dark().copyWith(
+            scaffoldBackgroundColor: const Color(0xFF0B0B0B),
+          ),
+          home: home,
+        );
+      },
     );
   }
 }
@@ -78,10 +75,27 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
   bool showAgents = false;
   bool showModelSheet = false;
   bool showMenu = false;
-  bool inChat = false;
-  final List<ChatMessage> _messages = [];
   final TextEditingController _chatController = TextEditingController();
   final FocusNode _chatFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _initChat());
+  }
+
+  Future<void> _initChat() async {
+    final chat = context.read<ChatService>();
+    try {
+      await chat.init();
+      if (chat.sessions.isEmpty) {
+        await chat.createSession(title: 'New chat');
+      }
+      await chat.setActiveSession(chat.sessions.first.id);
+    } catch (_) {
+      // Server not available yet — user can start a new chat manually
+    }
+  }
 
   void closeAll() {
     setState(() {
@@ -90,11 +104,14 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
     });
   }
 
-  void _startNewChat() {
+  void _startNewChat() async {
+    final chat = context.read<ChatService>();
+    try {
+      final session = await chat.createSession(title: 'New chat');
+      await chat.setActiveSession(session.id);
+    } catch (_) {}
     setState(() {
-      inChat = true;
       showMenu = false;
-      _messages.clear();
     });
     _chatFocus.requestFocus();
   }
@@ -134,14 +151,19 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
   void _sendMessage() {
     final text = _chatController.text.trim();
     if (text.isEmpty) return;
-    setState(() {
-      _messages.add(ChatMessage(text: text, isUser: true));
-      _chatController.clear();
-    });
+    final chat = context.read<ChatService>();
+    chat.sendMessage(text);
+    _chatController.clear();
   }
 
   @override
   Widget build(BuildContext context) {
+    final chat = context.watch<ChatService>();
+    final messages = chat.activeSessionId != null
+        ? chat.messagesFor(chat.activeSessionId!)
+        : <ChatMessage>[];
+    final inChat = messages.isNotEmpty || chat.activeSessionId != null;
+
     return Scaffold(
       backgroundColor: const Color(0xFF0B0B0B),
       body: GestureDetector(
@@ -150,10 +172,8 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
         child: SafeArea(
           child: Stack(
             children: [
-              /// Main Layout
               Column(
                 children: [
-                  /// Top Bar with Hamburger
                   Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
@@ -185,10 +205,9 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                     ),
                   ),
 
-                  /// Content: Logo or Chat
                   Expanded(
-                    child: inChat
-                        ? ChatScreen(messages: _messages)
+                    child: messages.isNotEmpty
+                        ? ChatScreen(messages: messages)
                         : Center(
                             child: Opacity(
                               opacity: 0.5,
@@ -200,7 +219,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                           ),
                   ),
 
-                  /// Chat Bar
                   ChatBar(
                     controller: _chatController,
                     focusNode: _chatFocus,
@@ -222,7 +240,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                 ],
               ),
 
-              /// Side Menu Backdrop
               if (showMenu)
                 GestureDetector(
                   onTap: () {
@@ -233,7 +250,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                   child: Container(color: Colors.black54),
                 ),
 
-              /// Side Menu
               AnimatedPositioned(
                 duration: const Duration(milliseconds: 250),
                 curve: Curves.easeOut,
@@ -248,7 +264,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                 ),
               ),
 
-              /// Agents Popup
               Positioned(
                 bottom: 110,
                 right: 16,
@@ -259,7 +274,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
                 ),
               ),
 
-              /// Model Bottom Sheet (NON-DRAGGABLE)
               AnimatedPositioned(
                 duration: const Duration(milliseconds: 250),
                 curve: Curves.easeOut,
@@ -276,9 +290,6 @@ class _OpenCodeScreenState extends State<OpenCodeScreen> {
   }
 }
 
-//
-// 🔹 Chat Bar
-//
 class ChatBar extends StatelessWidget {
   final VoidCallback onAgentsTap;
   final VoidCallback onModelTap;
@@ -379,9 +390,6 @@ class ChatBar extends StatelessWidget {
   }
 }
 
-//
-// 🔹 Agents Popup
-//
 class AgentsPopup extends StatelessWidget {
   const AgentsPopup({super.key});
 
@@ -420,9 +428,6 @@ class AgentsPopup extends StatelessWidget {
   }
 }
 
-//
-// 🔹 Model Sheet (NON-DRAGGABLE)
-//
 class ModelSheet extends StatelessWidget {
   const ModelSheet({super.key});
 
@@ -436,7 +441,6 @@ class ModelSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            /// Handle
             Container(
               width: 40,
               height: 5,
@@ -445,21 +449,13 @@ class ModelSheet extends StatelessWidget {
                 borderRadius: BorderRadius.circular(10),
               ),
             ),
-
             const SizedBox(height: 12),
-
             const Text("Server", style: TextStyle(fontWeight: FontWeight.w600)),
-
             const SizedBox(height: 16),
-
-            /// Switch Model
             _sectionTitle("Switch Model"),
             _option("Opus 4.8 (High)"),
             _option("Deepseek V4"),
-
             const SizedBox(height: 10),
-
-            /// Switch Provider
             _sectionTitle("Switch Provider"),
             _option("Zen"),
           ],
@@ -489,19 +485,6 @@ class ModelSheet extends StatelessWidget {
   }
 }
 
-//
-// 🔹 Chat Message Model
-//
-class ChatMessage {
-  final String text;
-  final bool isUser;
-
-  const ChatMessage({required this.text, required this.isUser});
-}
-
-//
-// 🔹 Chat Screen
-//
 class ChatScreen extends StatelessWidget {
   final List<ChatMessage> messages;
 
@@ -522,22 +505,21 @@ class ChatScreen extends StatelessWidget {
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final msg = messages[index];
+        final isUser = msg.role == MessageRole.user;
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Align(
-            alignment: msg.isUser
-                ? Alignment.centerRight
-                : Alignment.centerLeft,
+            alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
             child: Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: msg.isUser
+                color: isUser
                     ? const Color(0xFF1A5CFF)
                     : const Color(0xFF2A2A2A),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                msg.text,
+                msg.content,
                 style: const TextStyle(color: Colors.white),
               ),
             ),
@@ -548,9 +530,6 @@ class ChatScreen extends StatelessWidget {
   }
 }
 
-//
-// 🔹 Side Menu
-//
 class SideMenu extends StatelessWidget {
   final VoidCallback? onNewChat;
   final VoidCallback? onAgentsTap;
@@ -567,6 +546,8 @@ class SideMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final sessions = context.watch<ChatService>().sessions;
+
     return Container(
       width: 280,
       color: const Color(0xFF000000),
@@ -575,7 +556,6 @@ class SideMenu extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SvgPicture.asset("assets/opencode-dark.svg", width: 40),
-
           const SizedBox(height: 34),
 
           GestureDetector(
@@ -585,7 +565,6 @@ class SideMenu extends StatelessWidget {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w400),
             ),
           ),
-
           const SizedBox(height: 12),
 
           GestureDetector(
@@ -595,7 +574,6 @@ class SideMenu extends StatelessWidget {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w400),
             ),
           ),
-
           const SizedBox(height: 12),
 
           GestureDetector(
@@ -605,36 +583,34 @@ class SideMenu extends StatelessWidget {
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w400),
             ),
           ),
-
           const SizedBox(height: 40),
 
           const Text(
             "Previous Chats",
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
           ),
-
           const SizedBox(height: 20),
 
           Expanded(
-            child: ListView(
+            child: ListView.builder(
               padding: EdgeInsets.zero,
-              children: const [
-                ChatHistoryTile(
-                  title: "Project1",
-                  subtitle: "Bug Fix in rust codesbas.",
-                  expanded: true,
-                ),
-                SizedBox(height: 16),
-                ChatHistoryTile(title: "Download and fix WSL"),
-                SizedBox(height: 16),
-                ChatHistoryTile(title: "Overlay Width Clamp"),
-                SizedBox(height: 16),
-                ChatHistoryTile(title: "Populate Feature Service"),
-                SizedBox(height: 16),
-                ChatHistoryTile(title: "Gemma 4 2b Integration"),
-                SizedBox(height: 16),
-                ChatHistoryTile(title: "Strip MediaProjection,add"),
-              ],
+              itemCount: sessions.length,
+              itemBuilder: (context, index) {
+                final session = sessions[index];
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 16),
+                  child: GestureDetector(
+                    onTap: () {
+                      context.read<ChatService>().setActiveSession(session.id);
+                      Navigator.pop(context);
+                    },
+                    child: Text(
+                      session.title,
+                      style: const TextStyle(fontSize: 18),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
 
@@ -650,18 +626,16 @@ class SideMenu extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ),
-
                 const SizedBox(width: 12),
-
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text("Account Name", style: TextStyle(fontSize: 14)),
-                      SizedBox(height: 2),
+                      const Text("Account Name", style: TextStyle(fontSize: 14)),
+                      const SizedBox(height: 2),
                       Text(
                         "hostname 0.0.0.0 --port 4096",
-                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                        style: const TextStyle(fontSize: 11, color: Colors.grey),
                       ),
                     ],
                   ),
@@ -671,48 +645,6 @@ class SideMenu extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-//
-// 🔹 Chat History Tile
-//
-class ChatHistoryTile extends StatelessWidget {
-  final String title;
-  final String? subtitle;
-  final bool expanded;
-
-  const ChatHistoryTile({
-    super.key,
-    required this.title,
-    this.subtitle,
-    this.expanded = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(child: Text(title, style: const TextStyle(fontSize: 18))),
-            if (expanded) const Icon(Icons.keyboard_arrow_down, size: 18),
-          ],
-        ),
-
-        if (subtitle != null) ...[
-          const SizedBox(height: 4),
-          Padding(
-            padding: const EdgeInsets.only(left: 20),
-            child: Text(
-              subtitle!,
-              style: const TextStyle(fontSize: 13, color: Colors.white70),
-            ),
-          ),
-        ],
-      ],
     );
   }
 }
