@@ -1,183 +1,294 @@
 package dev.opencode.mobile
 
-import android.content.Context
+import android.content.ComponentName
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Bundle
+import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.*
+import org.openziti.Ziti
+import org.openziti.ZitiConnection
+import org.openziti.ZitiContext
+import java.io.*
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URL
+import java.security.KeyStore
 
 class MainActivity : FlutterActivity() {
+    private val zitiChannel = "dev.opencode/ziti"
+    private val tailscaleChannel = "dev.opencode/tailscale"
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var backend: com.tailscale.libtailscale.Backend? = null
-    private var statusSink: EventChannel.EventSink? = null
+    private val tailscalePackage = "com.tailscale.ipn"
+    private val tailscaleReceiverClass = "$tailscalePackage.IPNReceiver"
 
-    companion object {
-        const val METHOD_CHANNEL = "dev.opencode/tailscale"
-        const val STATUS_CHANNEL = "dev.opencode/tailscale/status"
-    }
+    private var identityFile: File? = null
+    private var zitiContext: ZitiContext? = null
+    private var proxy: ZitiTcpProxy? = null
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+    override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            METHOD_CHANNEL
+            zitiChannel
         ).setMethodCallHandler { call, result ->
-            when (call.method) {
-                "start" -> {
-                    val hostname = call.argument<String>("hostname") ?: "opencode-mobile"
-                    val authKey  = call.argument<String>("authKey")
-                    scope.launch {
-                        try {
-                            val status = startNode(hostname, authKey)
-                            result.success(status)
-                        } catch (e: Exception) {
-                            result.error("TS_START_FAILED", e.message, null)
+            scope.launch {
+                try {
+                    when (call.method) {
+                        "enroll" -> {
+                            val jwtUrl = call.argument<String>("jwtUrl") ?: ""
+                            enroll(jwtUrl)
+                            result.success(buildStatusMap())
                         }
+                        "connect" -> {
+                            connect()
+                            result.success(buildStatusMap())
+                        }
+                        "getStatus" -> {
+                            result.success(buildStatusMap())
+                        }
+                        "disconnect" -> {
+                            disconnect()
+                            result.success(null)
+                        }
+                        else -> result.notImplemented()
                     }
+                } catch (e: Exception) {
+                    result.success(buildErrorMap(e.message ?: "Unknown error"))
                 }
-                "stop" -> {
-                    scope.launch {
-                        stopNode()
-                        result.success(null)
-                    }
-                }
-                "getStatus" -> {
-                    scope.launch {
-                        result.success(buildStatusMap())
-                    }
-                }
-                "resolvePeer" -> {
-                    val hostname = call.argument<String>("hostname") ?: ""
-                    scope.launch {
-                        result.success(resolvePeer(hostname))
-                    }
-                }
-                "listPeers" -> {
-                    scope.launch {
-                        result.success(listPeers())
-                    }
-                }
-                else -> result.notImplemented()
             }
         }
 
-        EventChannel(
+        setupTailscaleChannel(flutterEngine)
+    }
+
+    private fun setupTailscaleChannel(flutterEngine: FlutterEngine) {
+        MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            STATUS_CHANNEL
-        ).setStreamHandler(object : EventChannel.StreamHandler {
-            override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
-                statusSink = events
+            tailscaleChannel
+        ).setMethodCallHandler { call, result ->
+            scope.launch {
+                try {
+                    when (call.method) {
+                        "isInstalled" -> {
+                            result.success(isTailscaleInstalled())
+                        }
+                        "connect" -> {
+                            connectTailscale()
+                            result.success(buildTailscaleStatusMap())
+                        }
+                        "disconnect" -> {
+                            disconnectTailscale()
+                            result.success(buildTailscaleStatusMap())
+                        }
+                        "getStatus" -> {
+                            result.success(buildTailscaleStatusMap())
+                        }
+                        "getTailscaleIP" -> {
+                            result.success(getTailscaleIP())
+                        }
+                        else -> result.notImplemented()
+                    }
+                } catch (e: Exception) {
+                    result.success(mapOf(
+                        "connected" to false,
+                        "error" to (e.message ?: "Unknown error")
+                    ))
+                }
             }
-            override fun onCancel(arguments: Any?) {
-                statusSink = null
-            }
-        })
-    }
-
-    private suspend fun startNode(
-        hostname: String,
-        authKey: String?
-    ): Map<String, Any?> = withContext(Dispatchers.IO) {
-        if (backend != null) return@withContext buildStatusMap()
-
-        val dataDir = applicationContext
-            .getDir("tailscale", Context.MODE_PRIVATE)
-            .absolutePath
-
-        val ts = com.tailscale.libtailscale.Tailscale.newBackend(
-            dataDir,
-            applicationContext,
-            hostname,
-        )
-        backend = ts
-
-        ts.setStateChangeCallback { state ->
-            scope.launch(Dispatchers.Main) {
-                statusSink?.success(buildStatusMapFromState(state, ts))
-            }
-        }
-
-        if (!authKey.isNullOrBlank()) {
-            ts.setAuthKey(authKey)
-        }
-
-        ts.start()
-        buildStatusMap()
-    }
-
-    private suspend fun stopNode() = withContext(Dispatchers.IO) {
-        backend?.quit()
-        backend = null
-    }
-
-    private fun buildStatusMap(): Map<String, Any?> {
-        val ts = backend ?: return mapOf("state" to "stopped")
-        return try {
-            val state = ts.state
-            val prefs = ts.preferences
-            mapOf(
-                "state"       to mapTsState(state),
-                "hostname"    to prefs?.hostname,
-                "tailnetName" to ts.networkName,
-                "ipv4"        to ts.ipv4Address,
-                "ipv6"        to ts.ipv6Address,
-                "loginUrl"    to if (mapTsState(state) == "needsLogin") ts.authUrl else null,
-            )
-        } catch (e: Exception) {
-            mapOf("state" to "error", "error" to e.message)
         }
     }
 
-    private fun buildStatusMapFromState(
-        state: String,
-        ts: com.tailscale.libtailscale.Backend
-    ): Map<String, Any?> = mapOf(
-        "state"       to mapTsState(state),
-        "hostname"    to try { ts.preferences?.hostname } catch (_: Exception) { null },
-        "tailnetName" to try { ts.networkName } catch (_: Exception) { null },
-        "ipv4"        to try { ts.ipv4Address } catch (_: Exception) { null },
-        "ipv6"        to try { ts.ipv6Address } catch (_: Exception) { null },
-        "loginUrl"    to if (state == "NeedsLogin") try { ts.authUrl } catch (_: Exception) { null } else null,
+    private suspend fun enroll(jwtUrl: String) = withContext(Dispatchers.IO) {
+        val jwtFile = File(cacheDir, "enroll.jwt")
+        try {
+            URL(jwtUrl).openStream().use { input ->
+                FileOutputStream(jwtFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+
+            val identityPwd = "opencode".toCharArray()
+            val ks = KeyStore.getInstance("PKCS12").apply { load(null, null) }
+            val jwtBytes = jwtFile.readBytes()
+            Ziti.enroll(ks, jwtBytes, "opencode")
+
+            identityFile = File(filesDir, "ziti-identity.p12")
+            ks.store(identityFile!!.outputStream(), identityPwd)
+        } finally {
+            jwtFile.delete()
+        }
+    }
+
+    private suspend fun connect() = withContext(Dispatchers.IO) {
+        val idFile = identityFile
+            ?: throw Exception("Not enrolled. Enroll first.")
+
+        val ctx = Ziti.newContext(idFile, "opencode".toCharArray())
+        zitiContext = ctx
+
+        val p = ZitiTcpProxy(ctx, "opencode-svc", 4095)
+        p.start(scope)
+        proxy = p
+    }
+
+    private fun disconnect() {
+        proxy?.stop()
+        proxy = null
+        zitiContext?.destroy()
+        zitiContext = null
+    }
+
+    private fun buildStatusMap(): Map<String, Any?> = mapOf(
+        "enrolled"  to (identityFile?.exists() == true),
+        "connected" to (proxy?.isActive == true),
     )
 
-    private fun mapTsState(raw: String): String = when (raw) {
-        "Running"    -> "running"
-        "Starting"   -> "starting"
-        "NeedsLogin" -> "needsLogin"
-        "Stopped"    -> "stopped"
-        else         -> "stopped"
+    private fun buildErrorMap(msg: String): Map<String, Any?> = mapOf(
+        "enrolled"  to (identityFile?.exists() == true),
+        "connected" to false,
+        "error"     to msg,
+    )
+
+    private fun isTailscaleInstalled(): Boolean {
+        return try {
+            packageManager.getPackageInfo(tailscalePackage, 0)
+            true
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
     }
 
-    private fun resolvePeer(hostname: String): String? {
-        val ts = backend ?: return null
-        return try {
-            ts.peers()
-                ?.firstOrNull { it.hostName == hostname || it.dnsName.startsWith(hostname) }
-                ?.tailscaleIPs
-                ?.firstOrNull { it.contains('.') }
-        } catch (_: Exception) { null }
+    private fun connectTailscale() {
+        val intent = Intent("com.tailscale.ipn.CONNECT_VPN").apply {
+            component = ComponentName(tailscalePackage, tailscaleReceiverClass)
+            addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+        }
+        sendBroadcast(intent)
     }
 
-    private fun listPeers(): List<Map<String, Any?>> {
-        val ts = backend ?: return emptyList()
+    private fun disconnectTailscale() {
+        val intent = Intent("com.tailscale.ipn.DISCONNECT_VPN").apply {
+            component = ComponentName(tailscalePackage, tailscaleReceiverClass)
+            addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun buildTailscaleStatusMap(): Map<String, Any?> {
+        val ip = getTailscaleIP()
+        return mapOf(
+            "connected" to (ip != null),
+            "tailscaleIP" to ip,
+        )
+    }
+
+    private fun getTailscaleIP(): String? {
         return try {
-            ts.peers()?.map { peer ->
-                mapOf(
-                    "hostname" to peer.hostName,
-                    "ipv4"     to peer.tailscaleIPs.firstOrNull { it.contains('.') },
-                    "ipv6"     to peer.tailscaleIPs.firstOrNull { it.contains(':') },
-                    "os"       to peer.os,
-                    "online"   to peer.online,
-                )
-            } ?: emptyList()
-        } catch (_: Exception) { emptyList() }
+            NetworkInterface.getNetworkInterfaces()?.asSequence()
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.filterIsInstance<Inet4Address>()
+                ?.firstOrNull { addr ->
+                    val bytes = addr.address
+                    bytes[0] == 100.toByte() && (bytes[1].toInt() and 0xC0) == 0x40
+                }
+                ?.hostAddress
+        } catch (_: Exception) {
+            null
+        }
     }
 
     override fun onDestroy() {
+        disconnect()
         scope.cancel()
         super.onDestroy()
+    }
+}
+
+private class ZitiTcpProxy(
+    private val ctx: ZitiContext,
+    private val serviceName: String,
+    private val port: Int,
+) {
+    @Volatile
+    var isActive: Boolean = false
+
+    private var serverSocket: ServerSocket? = null
+    private var job: Job? = null
+
+    fun start(scope: CoroutineScope) {
+        isActive = true
+        job = scope.launch(Dispatchers.IO) {
+            val ss = ServerSocket(port)
+            serverSocket = ss
+            try {
+                while (isActive) {
+                    val client = ss.accept()
+                    scope.launch {
+                        try {
+                            relay(client)
+                        } catch (_: Exception) {
+                            client.close()
+                        }
+                    }
+                }
+            } catch (e: IOException) {
+                if (isActive) throw e
+            } finally {
+                ss.close()
+            }
+        }
+        job?.invokeOnCompletion { isActive = false }
+    }
+
+    private suspend fun relay(client: Socket) = withContext(Dispatchers.IO) {
+        val zitiConn: ZitiConnection = ctx.dial(serviceName)
+        try {
+            val clientIn = client.getInputStream()
+            val clientOut = client.getOutputStream()
+
+            val fwd = launch {
+                try {
+                    val bytes = ByteArray(8192)
+                    while (true) {
+                        val n = clientIn.read(bytes)
+                        if (n == -1) break
+                        zitiConn.write(bytes.copyOf(n))
+                    }
+                } finally {
+                    zitiConn.close()
+                }
+            }
+            val bwd = launch {
+                try {
+                    val bytes = ByteArray(8192)
+                    while (true) {
+                        val n = zitiConn.read(bytes, 0, bytes.size)
+                        if (n == -1) break
+                        clientOut.write(bytes, 0, n)
+                    }
+                } finally {
+                    client.close()
+                }
+            }
+            fwd.join()
+            bwd.join()
+        } finally {
+            try { zitiConn.close() } catch (_: Exception) {}
+            try { client.close() } catch (_: Exception) {}
+        }
+    }
+
+    fun stop() {
+        isActive = false
+        job?.cancel()
+        serverSocket?.close()
     }
 }

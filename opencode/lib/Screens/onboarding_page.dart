@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:opencode/agent.dart';
+import 'package:opencode/services/discovery_service.dart';
 import 'package:provider/provider.dart';
 
 class OnboardingConnectPage extends StatefulWidget {
@@ -17,7 +18,10 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
   final passwordController = TextEditingController();
   bool obscurePassword = true;
   bool connecting = false;
+  bool scanning = false;
   String? error;
+  List<DiscoveredServer>? discovered;
+  final _discovery = DiscoveryService();
 
   @override
   void dispose() {
@@ -50,6 +54,25 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
         widget.onConnected();
       } else {
         error = conn.lastError;
+      }
+    });
+  }
+
+  Future<void> _scanNetwork() async {
+    setState(() {
+      scanning = true;
+      discovered = null;
+      error = null;
+    });
+
+    final servers = await _discovery.scan();
+
+    if (!mounted) return;
+    setState(() {
+      scanning = false;
+      discovered = servers;
+      if (servers.isEmpty) {
+        error = 'No OpenCode servers found on this network';
       }
     });
   }
@@ -128,6 +151,61 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
     );
   }
 
+  Widget _serverCard(DiscoveredServer server) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: GestureDetector(
+        onTap: () {
+          urlController.text = server.url;
+        },
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1A1A1A),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFF2A2A2A)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFF00FF66),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      server.hostname ?? server.ip,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      server.url,
+                      style: const TextStyle(
+                        color: Colors.grey,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.grey, size: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -190,7 +268,7 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
                       ),
                     ),
 
-                    if (error != null) ...[
+                    if (error != null && (discovered == null || discovered!.isEmpty)) ...[
                       const SizedBox(height: 12),
                       Text(
                         error!,
@@ -216,6 +294,52 @@ class _OnboardingConnectPageState extends State<OnboardingConnectPage> {
                         ),
                       ),
                     ),
+
+                    const SizedBox(height: 12),
+
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton.icon(
+                        onPressed: scanning ? null : _scanNetwork,
+                        icon: scanning
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white70,
+                                ),
+                              )
+                            : const Icon(Icons.wifi_find, size: 20),
+                        label: Text(
+                          scanning ? "Scanning..." : "Scan Network",
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1A1A1A),
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Color(0xFF2A2A2A)),
+                        ),
+                      ),
+                    ),
+
+                    if (discovered != null && discovered!.isNotEmpty) ...[
+                      const SizedBox(height: 20),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          "Found Servers",
+                          style: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      ...discovered!.map((server) => _serverCard(server)),
+                    ],
 
                     const SizedBox(height: 16),
 
