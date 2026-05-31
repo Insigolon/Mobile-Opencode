@@ -85,12 +85,20 @@ class DiscoveryService {
 
   Future<String?> _getLocalSubnet() async {
     try {
+      final skipNames = ['tailscale', 'ziti', 'vether', 'utun', 'docker', 'vmnet'];
+      final skipPrefixes = ['169.', '100.', '172.'];
       final interfaces = await NetworkInterface.list();
+
       for (final iface in interfaces) {
+        final name = iface.name.toLowerCase();
+        if (skipNames.any((s) => name.contains(s))) continue;
+
         for (final addr in iface.addresses) {
           if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
-            final parts = addr.address.split('.');
-            if (parts.length == 4 && parts[0] != '169') {
+            final ip = addr.address;
+            if (skipPrefixes.any((p) => ip.startsWith(p))) continue;
+            final parts = ip.split('.');
+            if (parts.length == 4) {
               return '${parts[0]}.${parts[1]}.${parts[2]}';
             }
           }
