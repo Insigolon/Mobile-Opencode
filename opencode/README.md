@@ -1,17 +1,31 @@
 # opencode
 
-A new Flutter project.
+A mobile app for OpenCode that lets you interact with your coding agent from your phone.
 
-## Getting Started
+Manage coding sessions, send prompts, monitor agent activity, and stay connected to your development workflow without being tied to your desktop.
 
-This project is a starting point for a Flutter application.
+# Early development — This project is actively being built and APIs/features may change.
 
-A few resources to get you started if this is your first Flutter project:
+# Features
+ Mobile-first interface for OpenCode
+ Chat with your coding agent
+ Send prompts and instructions remotely
+ Browse and manage coding sessions
+ Real-time agent responses
+ Monitor running tasks
+ Continue conversations across devices
+ Dark-mode friendly UI
+ Designed with secure remote access in mind
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+#Installation
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Clone the repository:
+```
+ git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
+ cd YOUR_REPOSITORY
+```
+Install dependencies:
+
+```
+ npm install
+```
